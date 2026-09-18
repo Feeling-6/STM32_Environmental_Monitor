@@ -100,8 +100,13 @@ I2C2 上挂了多个从机，地址互不冲突：**OLED `0x3C`、SHT30 `0x44`**
 | **AFIO 时钟必须先开**                                                              | `GPIO_PinRemapConfig` 直接写 `AFIO->MAPR`，时钟没开**写被静默丢弃**。`RCC_APB2Periph_AFIO` 要和 GPIO 时钟一起开                                                                                          | `Key.c`                                             |
 | **绝不用 `GPIO_Remap_SWJ_Disable`（0x00300400）**                                  | 那是 "Full SWJ Disabled"，**连 SWD 一起关，ST-Link 再也连不上**。只能用 `GPIO_Remap_SWJ_JTAGDisable`（0x00300200，保留 SWD）                                                                             | `stm32f10x_gpio.h:195-197`                          |
 | **`GPIO_Init` 掩码绝不能写 `GPIO_Pin_All`**                                        | 会重写掩码里每一位的 CNF/MODE，毁掉 PB10/PB11（I2C2 → OLED+SHT30 全挂）、PA0/PA1（ADC）、甚至 **PA13/PA14（SWD → 连不上）**。**逐个引脚调用**                                                            | `Key.c` 的引脚表循环                                |
-| **TIM1 是高级定时器，不调 `TIM_CtrlPWMOutputs(TIM1, ENABLE)` 就没有任何 PWM 输出** | BDTR 的 MOE 位默认是关的。TIM2/3/4 **不需要**这步 —— 从通用定时器换过来极易卡住                                                                                                                          | 蜂鸣器驱动（待写）                                  |
-| TIM1 挂在 **APB2**                                                                 | 要用 `RCC_APB2Periph_TIM1`，不是 APB1。用错能编译过但没波形                                                                                                                                              | 同上                                                |
+| **高级定时器不调 `TIM_CtrlPWMOutputs` 就没有任何 PWM 输出**                        | TIM1/TIM8 是高级定时器，BDTR 的 MOE 位默认是关的。**TIM2/3/4 不需要这步**（它们没有 MOE）—— 从高级定时器换过来极易卡住。蜂鸣器用 TIM3_CH4 正好躲开                                                          | `AGENTS.md` 本节                                    |
+| 定时器挂哪条 APB，决定用哪个时钟宏                                                 | TIM1 在 **APB2**（`RCC_APB2Periph_TIM1`）；**TIM2/3/4 在 APB1**（`RCC_APB1Periph_TIMx`）。用错能编译过但没波形/没中断。注意 APB1 分频=2，但定时器时钟**翻倍**，仍是 72MHz                                                                                              | 蜂鸣器 `RCC_APB1Periph_TIM3`                        |
+| **改 PWM 频率必须 `TIM_GenerateEvent(UG)` 把 CNT 清零**                            | 计数器停过再启动时 CNT 从冻结值继续数。新 ARR 比它小的话（上一轮停在 1800、这一轮 ARR=954）要一路数到 `0xFFFF` 才回绕 → **第一声变成 65ms 的怪音**。UG 顺便把 UIF 置起来，所以紧接着必须 `TIM_ClearITPendingBit` 再开中断源 | `Buzzer.c` 的 `Buzzer_Beep`                         |
+| **PWM 停机不能"改 CCR=0 再 `TIM_Cmd(DISABLE)`"**                                   | F1 的 PWM 输出电平不是简单的 `CNT<CCR` 比较器，是"**更新事件置高、比较匹配拉低**"驱动的。改 CCR 收不回已经置高的输出，紧接着关计数器会把它**冻在高电平**（高电平触发的蜂鸣器就此持续通直流发烫）。而本模块的停机动作恰好发生在更新中断里，那一刻硬件刚把输出置高 —— **100% 复现**。正解是 `TIM_ForcedOC4Config(TIMx, TIM_ForcedAction_InActive)`，由输出级无条件拉低，与 CNT/CCR 无关。代价：OC4M 被改成"强制无效"，**每次起音都要重配回 PWM1** | `Buzzer.c` 的 `Buzzer_Stop` / `Buzzer_Load`         |
+| **`TIM_OCPolarity` 漏赋值 = 上电长响**                                             | `TIM_OC4Init` 会读 `TIM_OCInitStruct->TIM_OCPolarity` 写 CC4P 位，而 `TIM_OCInitTypeDef` 是**栈上的局部变量**。漏赋值就是垃圾值，一旦 CC4P=1 输出反相 → **上电即长响、按键反而让它停**，和"模块其实是低电平触发"的现象一模一样。`TIM_OCPolarity_High` 才是"不反相"（它 = `0x0000`） | `stm32f10x_tim.c:552`、`Buzzer.c`                   |
+| **`TIM_OCInitTypeDef` 里没有 `TIM_OCPreload` 成员**                                | 那是 F4/HAL 才有的字段（本项目 SPL v3.6 的 `stm32f10x_tim.h:79-108` 只有 8 个成员）。照抄网上代码写 `TIM_OCInitStructure.TIM_OCPreload = ...` 会**编译不过**                                                                                                            | `stm32f10x_tim.h:79-108`                            |
+| **`TIM_SelectOCxM` 会清掉 CCxE 且不恢复**                                          | SPL 的实现只做 `CCER &= ~CCxE`，函数末尾**没有**重新使能输出（`stm32f10x_tim.c:2060`）。直接用它改输出模式会让通道静默失能、彻底没波形。要用就必须跟着一句 `TIM_CCxCmd(TIMx, TIM_Channel_x, ENABLE)`                                                                   | `stm32f10x_tim.c:2044-2082`                         |
 
 ### 4.5 ADC + DMA
 
@@ -146,6 +151,14 @@ I2C2 上挂了多个从机，地址互不冲突：**OLED `0x3C`、SHT30 `0x44`**
 
 - **`pio run` 显示 `Took 1.xx seconds` 且体积变了**：说明只重编了改动的文件。要看全量结果先 `-t clean`。
 
+- **按住一个键不放，约 11 秒后就再也不响了**（松手重按又正常）：
+  这是 `Key.c` 刻意的防卡键设计，**不是蜂鸣器或按键坏了**。
+  按下满 1 秒报一次 `KEY_EVENT_LONG`，之后每 200ms 报一次 `KEY_EVENT_LONG_REPEAT`，
+  但 `Key.c:192` 有 `if (RepeatCnt < KEY_REPEAT_MAX)`（`Key.h:14`，50 次）——
+  报满 50 次就不再产生事件，于是蜂鸣器没得响。松手重按时 `Key.c:161` 把
+  `RepeatCnt` 清零，所以立刻恢复。总时长 ≈ 1s + 50×200ms ≈ 11 秒。
+  要改就是改 `KEY_REPEAT_MAX`（改大会让卡键时刷得更多）。
+
 ---
 
 ## 6. 引脚与外设分配
@@ -160,12 +173,14 @@ I2C2 上挂了多个从机，地址互不冲突：**OLED `0x3C`、SHT30 `0x44`**
 | 光敏电阻  | ADC1_IN1      | PA1                                      | 3.3V 供电                             |
 | 6 按键    | GPIO 上拉输入 | PB15 PA9 PB3 PB5 PB7 PB9（即按键1~6）    | 另一端接 GND，**按下=低**             |
 | LED       | GPIO 推挽     | PB12                                     | **高电平点亮**（PB12→1k→LED正极→GND） |
-| 蜂鸣器    | TIM1_CH3      | **PA10**                                 | 无源蜂鸣器（高电平触发），**待写**    |
-| SD 卡     | SPI1          | **PA4(CS) PA5(SCK) PA6(MISO) PA7(MOSI)** | **待写**                              |
+| 蜂鸣器    | TIM3_CH4      | **PB1**                                  | 无源蜂鸣器（**高电平触发**），3.3V 供电，**已写代码待上板验证** |
+| SD 卡     | SPI1          | **PA4(CS) PA5(SCK) PA6(MISO) PA7(MOSI)** | **待写**。模块 VCC **必须接 5V**（板载 LDO + 电平转换那种） |
 | SWD       | —             | PA13 / PA14                              | 调试用，**绝不能占用**                |
 
-**空闲引脚**：PA2 PA3 PA8 PA11 PA12 PA15 PB0 PB1 PB2 PB4 PB6 PB8 PB13 PB14
+**空闲引脚**：PA2 PA3 PA8 PA11 PA12 PA15 PB0 PB2 PB4 PB6 PB8 PB13 PB14
 其中 **PA2/PA3 建议留给 USART2 做串口日志**（`printf` 重定向）。
+**PB0 = TIM3_CH3**（和蜂鸣器同一定时器的另一个通道），要加第二个 PWM 器件就是它。
+⚠️ **PB1 除 TIM3_CH4 外还是 `ADC1_IN9`** —— 以后给 ADC 加通道时不能碰；当前规则组只有 IN0/IN1。
 
 > ⚠️ **按键占用了这些脚的复用功能**：
 > `PA9` = USART1_TX（**USART1 因此作废**）、`PB15` = TIM1_CH3N、
@@ -183,12 +198,12 @@ I2C2 上挂了多个从机，地址互不冲突：**OLED `0x3C`、SHT30 `0x44`**
 | -------------------- | -------------------------------- |
 | I2C2                 | OLED + SHT30（+ 未来 DS3231）    |
 | ADC1 + DMA1_Channel1 | MQ-2 + 光敏，连续扫描 + 循环搬运 |
-| TIM2                 | 按键 10ms 扫描中断               |
-| TIM1_CH3             | 蜂鸣器 PWM（待写）               |
+| TIM2                 | 按键 10ms 扫描中断（抢占2/子2）  |
+| TIM3_CH4             | 蜂鸣器 PWM（抢占3/子3，比 TIM2 低） |
 | SPI1                 | SD 卡（待写）                    |
 | SysTick              | `Delay` 独占（轮询，不开中断）   |
 
-**空闲**：SPI2 USART2 USART3 I2C1 TIM3 TIM4 ADC2 RTC IWDG WWDG CAN USB
+**空闲**：SPI2 USART2 USART3 I2C1 TIM4 ADC2 RTC IWDG WWDG CAN USB
 （**USART1 已作废** —— 它的 TX 脚 PA9 被按键占用；串口日志走 USART2）
 
 > 注意 `SPI2`（MOSI 脚 **PB15 是按键1**）和 `USART3`（PB10/PB11 是 I2C2）
@@ -208,6 +223,7 @@ lib/Hardware/          每个模块一对 .c/.h
 ├── AD.c/h             ADC1+DMA 双通道模拟量（注意是 AD_ 不是 ADC_）
 ├── Key.c/h            6 按键：TIM2 中断扫描 + 消抖 + 5状态机 + 无锁环形队列
 ├── LED.c/h            PB12 单 LED
+├── Buzzer.c/h         PB1/TIM3_CH4 无源蜂鸣器 PWM。非阻塞，倒计时跑在 TIM3 更新中断里
 └── Delay.c/h          SysTick 轮询延时（自己拥有 SysTick）
 lib/SPL/               vendored ST 标准外设库，**不要改**
 src/main.c             启动顺序 + 应用逻辑
@@ -243,21 +259,27 @@ src/main.c             启动顺序 + 应用逻辑
 - ADC1 + DMA 双通道模拟量（连续扫描 + 循环搬运）
 - 6 按键（TIM2 中断扫描 + 状态机：单击/双击/长按/长按重复）
 - LED
+- 蜂鸣器 PWM 音调（PB1/TIM3_CH4，3.3V 供电）。按键号决定音高、事件类型决定时长，
+  上电一声自检。**非阻塞**——倒计时跑在 TIM3 更新中断里
 
 ### 未完成
 
 | #   | 事项                                 | 状态                 | 关键约束                                                                                                                                                               |
 | --- | ------------------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **蜂鸣器 PWM 音调**                  | 等货                 | 无源蜂鸣器**高电平触发**模块；**PA10 / TIM1_CH3**；**必须 `TIM_CtrlPWMOutputs(TIM1, ENABLE)`**；`TIM_OC3Init` + `TIM_SetCompare3`；**非阻塞**（不能 `Delay` 卡主循环） |
-| 2   | **SD 卡 + FATFS 数据记录**           | 等货                 | SPI1（PA4/PA5/PA6/PA7）；格式 `时间戳,温度,湿度,烟雾,光照`                                                                                                             |
-| 3   | **IWDG 看门狗**                      | **可立刻做，不用买** | 教程 14-1。做完"工业级"才有实际支撑                                                                                                                                    |
-| 4   | 串口日志（USART2 + `printf` 重定向） | 未开始               | 建议占 PA2/PA3                                                                                                                                                        |
-| 5   | 低功耗模式（停机/待机）              | 未开始               | 教程 13-x                                                                                                                                                              |
-| 6   | 多级菜单                             | 未开始               | 按键状态机已为此打好基础                                                                                                                                               |
-| 7   | **恢复传感器显示**                   | 待做                 | 调试期为按键界面腾位置撤下了。**恢复后 flash 会长约 2.8KB**                                                                                                            |
+| 1   | **SD 卡 + FATFS 数据记录**           | 等货                 | SPI1（PA4/PA5/PA6/PA7，默认映射）；**模块 VCC 必须接 5V**；格式 `时间戳,温度,湿度,烟雾,光照`。⚠️ PA4 必须先设成推挽输出并置高再去初始化 SPI1，否则卡片会在上电瞬间看到 CS 被拉低 |
+| 2   | **IWDG 看门狗**                      | **可立刻做，不用买** | 教程 14-1。做完"工业级"才有实际支撑                                                                                                                                    |
+| 3   | 串口日志（USART2 + `printf` 重定向） | 未开始               | 建议占 PA2/PA3                                                                                                                                                        |
+| 4   | 低功耗模式（停机/待机）              | 未开始               | 教程 13-x                                                                                                                                                              |
+| 5   | 多级菜单                             | 未开始               | 按键状态机已为此打好基础                                                                                                                                               |
+| 6   | **恢复传感器显示**                   | 待做                 | 调试期为按键界面腾位置撤下了。**恢复后 flash 会长约 2.8KB**                                                                                                            |
 
 ### ⚠️ 当前 OLED 显示的是**按键调试界面**，不是环境数据
 
 调试阶段 `src/main.c` 显示的是按键状态（计数/标签/实时状态/最近事件），
 **传感器采集仍在运行**（`SHT30_Init()`、`AD_Init()` 都还在调），只是没有显示。
 恢复显示时注意 flash 会长回去（见第 5 节）。
+
+第 3 行右侧还多了一个**帧计数 + BEEP 标志**（第 7 列为空，8~12 列是帧计数，
+13~16 列是 `Buzzer_IsBusy()`）：这是验证蜂鸣器**非阻塞**的现场手段 ——
+长按按键时帧计数如果卡顿，就说明哪次 `Buzzer_Beep` 里混进了阻塞延时。
+第 4 行第 10~13 列显示本次音高（Hz），第 14~15 列是单位。

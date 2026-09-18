@@ -24,6 +24,10 @@
   - 支持**单击 / 双击 / 长按 / 长按重复**四种事件
   - 事件通过**无锁 SPSC 环形队列**交给主循环
 - LED 状态指示（PB12）
+- **蜂鸣器音调反馈**（PB1 / TIM3_CH4，3.3V 无源蜂鸣器）
+  - 按键号决定音高（6 键 = 上行音阶 523~1047Hz），事件类型决定时长
+  - **非阻塞**：倒计时跑在 TIM3 更新中断里，响的时候主循环照常刷新
+  - 上电自检响一声
 
 **底层**
 - I2C2 总线层：**幂等初始化 + 超时保护 + 总线死锁恢复**，被 OLED 和 SHT30 共用
@@ -31,8 +35,7 @@
 
 ### 🚧 计划中（尚未实现，勿在简历中声称已完成）
 
-- 蜂鸣器 PWM 音调报警（无源蜂鸣器，TIM1_CH3 / PA10）
-- SD 卡数据记录（SPI1 + FATFS，带时间戳）
+- SD 卡数据记录（SPI1 + FATFS，带时间戳）—— 模块 VCC 必须接 5V
 - IWDG 独立看门狗
 - 串口日志（USART2 + `printf` 重定向）
 - 低功耗模式（停机 / 待机）
@@ -52,6 +55,8 @@
 | 光照 | 光敏电阻模块 | ADC1_IN1 | 3.3V 供电 |
 | 按键 | 轻触开关 ×6 | GPIO 上拉输入 | 另一端接 GND，按下为低 |
 | 指示 | LED + 1kΩ 限流电阻 | GPIO | **高电平点亮** |
+| 报警 | 无源蜂鸣器模块 | TIM3_CH4 (PWM) | **高电平触发**，3.3V 供电 |
+| 存储 | MicroSD 卡模块 | SPI1 | 6 脚（GND/VCC/MISO/MOSI/SCK/CS），VCC **必须 5V** |
 
 ### 引脚分配
 
@@ -61,6 +66,8 @@
 | MQ-2 / 光敏 | PA0 / PA1 | ADC1_IN0 / IN1 |
 | 6 按键 | PB15 / PA9 / PB3 / PB5 / PB7 / PB9 | GPIO |
 | LED | PB12 | GPIO |
+| 蜂鸣器 | PB1 | TIM3_CH4（默认映射，不重映射） |
+| SD 卡 | PA4 (CS) / PA5 (SCK) / PA6 (MISO) / PA7 (MOSI) | SPI1 |
 | SWD 调试 | PA13 / PA14 | — |
 
 **注意 PB3 的坑**：PB3 默认是 **JTDO**（JTAG 引脚），当普通 GPIO 用必须先执行
@@ -178,7 +185,7 @@ lib\Hardware\OLED_Font.h:6:1: warning: missing braces around initializer
 - [x] ADC1 + DMA 双通道模拟量
 - [x] 6 按键状态机（单击 / 双击 / 长按 / 长按重复）
 - [x] LED 指示
-- [ ] 蜂鸣器 PWM 音调报警
+- [x] 蜂鸣器 PWM 音调报警（PB1 / TIM3_CH4，非阻塞）
 - [ ] SD 卡数据记录（FATFS + 时间戳）
 - [ ] 独立看门狗 IWDG
 - [ ] 串口日志（`printf` 重定向）
@@ -198,6 +205,7 @@ lib\Hardware\OLED_Font.h:6:1: warning: missing braces around initializer
 │   │   ├── AD.c/h           ADC + DMA（注意前缀是 AD_ 不是 ADC_）
 │   │   ├── Key.c/h          TIM2 中断扫描 + 状态机 + 环形队列
 │   │   ├── LED.c/h
+│   │   ├── Buzzer.c/h       TIM3_CH4 PWM 音调（非阻塞，中断倒计时）
 │   │   └── Delay.c/h        SysTick 轮询延时
 │   └── SPL/                 vendored ST 标准外设库 v3.6.0
 ├── src/

@@ -4,12 +4,29 @@
 #include "AD.h"
 #include "Key.h"
 #include "LED.h"
+#include "Buzzer.h"
 #include "Delay.h"
 
 void SystemClock_Config_72MHz(void);
 
 /*调试界面用的累计计数：单击/双击/长按/长按重复*/
 static uint16_t s_Cnt[4] = {0, 0, 0, 0};
+
+/*主循环帧计数，每轮+1。用来盯着"蜂鸣器有没有阻塞主循环"：
+  它要是卡顿，说明哪次Beep里有阻塞延时。见Buzzer.h的"非阻塞"约定*/
+static uint16_t s_Frame = 0;
+
+/*按键号→音高，下标0=按键1。上行音阶，按1到6音调依次升高，
+  一耳朵就能听出按的是哪个键*/
+static const uint16_t s_NoteFreq[KEY_COUNT] = {
+	BUZZER_NOTE_C5, BUZZER_NOTE_D5, BUZZER_NOTE_E5,
+	BUZZER_NOTE_G5, BUZZER_NOTE_A5, BUZZER_NOTE_C6,
+};
+
+/*事件类型→时长(ms)，下标就是KeyEventType，[0]是"无事件"占位。
+  单击短促、双击和长按长一点、长按重复要短——重复音每200ms来一次，
+  单次太长会连成一片听不出节奏*/
+static const uint16_t s_EventMs[5] = {0, 100, 200, 200, 60};
 
 int main(void)
 {
@@ -31,6 +48,7 @@ int main(void)
 	AD_Init();								//同上
 
 	LED_Init();
+	Buzzer_Init();
 	Key_Init();								//放最后：SWJ重映射会清AFIO->MAPR，别抹掉别人的
 
 	/*静态标签只画一次*/
@@ -38,6 +56,10 @@ int main(void)
 	OLED_ShowString(2, 1, "123456");		//按键编号
 	OLED_ShowString(3, 1, "......");		//实时按下状态
 	OLED_ShowString(4, 1, "K- ------");		//最近事件
+
+	/*上电自检：听到"嘀"一声，就说明PB1接线 + TIM3时钟 + PWM通路全是通的，
+	  不用先按按键。非阻塞，不会拖慢首屏绘制*/
+	Buzzer_Beep(BUZZER_NOTE_C6, 100);
 
 	while (1)
 	{
@@ -47,8 +69,13 @@ int main(void)
 			LED_Toggle();					//每个事件翻转一次LED：没OLED也能验证驱动
 			s_Cnt[ev.Event - 1] ++;
 
+			/*响一声：按键号决定音高，事件类型决定时长。非阻塞，立刻返回*/
+			Buzzer_Beep(s_NoteFreq[ev.Key - 1], s_EventMs[ev.Event]);
+
 			OLED_ShowChar(4, 2, (char)(ev.Key + '0'));
 			OLED_ShowString(4, 4, Key_EventName(ev.Event));
+			OLED_ShowNum(4, 10, s_NoteFreq[ev.Key - 1], 4);	//本次音高，和听到的声音对照
+			OLED_ShowString(4, 14, "Hz");
 
 			OLED_ShowNum(1, 2,  s_Cnt[0], 2);
 			OLED_ShowNum(1, 6,  s_Cnt[1], 2);
@@ -79,6 +106,12 @@ int main(void)
 		}
 
 		latch = 0;							//本帧用完就清
+
+		/*非阻塞观测窗。左边是帧计数：蜂鸣器只要在哪次Beep里阻塞了主循环，
+		  这个数就会肉眼可见地卡顿。右边是BEEP标志，闪一下就说明确实在响。
+		  这两样是"非阻塞"唯一的现场证据*/
+		OLED_ShowNum(3, 8, s_Frame ++, 5);
+		OLED_ShowString(3, 13, Buzzer_IsBusy() ? "BEEP" : "    ");
 
 		OLED_Update();
 		Delay_ms(50);
