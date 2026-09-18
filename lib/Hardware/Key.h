@@ -51,9 +51,16 @@ uint16_t Key_GetDropped(void);
 /*事件名的可显示字符串，长度固定6字符（如"CLICK "/"DOUBLE"），供调试界面用*/
 char *Key_EventName(uint8_t Event);
 
-/*---------------- 引脚占用提醒 ----------------
-  PB3  = TIM2_CH2 的默认复用脚 —— 本驱动没开TIM2通道所以无影响，
-         但以后想用TIM2输出PWM得先把按键挪走
-  PB12 = TIM1_BKIN，PA12 = TIM1_ETR —— TIM1目前没用，用到时要留意*/
+/*---------------- 引脚占用提醒（按键占用了这些脚的复用功能）----------------
+  PB3  = JTDO        —— 必须靠SWJ重映射释放（见Key_Init）
+  PA9  = USART1_TX   —— USART1 作废，串口日志请改用 USART2(PA2/PA3)
+  PB15 = TIM1_CH3N   —— 互补输出，不可当普通PWM用
+  PB7  = TIM4_CH2    —— TIM4通道2不可用
+  PB9  = TIM4_CH4    —— TIM4通道4不可用
+  PB5  = TIM3_CH2    —— TIM3通道2不可用
+
+  另外注意：PB12~PB15 一整片都只有 TIM1 的互补输出/刹车脚
+  （CH1N/CH2N/CH3N/BKIN），没有普通定时器通道，
+  以后往那片挂 PWM 器件要小心。*/
 
 #endif

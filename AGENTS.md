@@ -96,7 +96,7 @@ I2C2 上挂了多个从机，地址互不冲突：**OLED `0x3C`、SHT30 `0x44`**
 | 坑                                                                                 | 后果                                                                                                                                                                                                     | 出处                                                |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | **`Key_Init()` 会清掉 `AFIO->MAPR` 低 24 位**                                      | `GPIO_Remap_SWJ_JTAGDisable` 走的 SPL 分支里有 `AFIO->MAPR &= 0xF0FFFFFF`，**副作用是抹掉所有外设重映射**。所以 **`Key_Init()` 必须放 `main()` 最后**，且**以后任何 `GPIO_PinRemapConfig` 都要在它之后** | `stm32f10x_gpio.c:548` 的 `DBGAFR_SWJCFG_MASK` 分支 |
-| **PB3 是 JTDO，必须重映射**                                                        | 按键4 用了 PB3。需要 `GPIO_PinRemapConfig(GPIO_Remap_SWJ_JTAGDisable, ENABLE)`，且**必须在 `GPIO_Init` 之前**（JTAG 优先级高于 CRH/CRL）                                                                 | `Key.c`                                             |
+| **PB3 是 JTDO，必须重映射**                                                        | 按键3 用了 PB3。需要 `GPIO_PinRemapConfig(GPIO_Remap_SWJ_JTAGDisable, ENABLE)`，且**必须在 `GPIO_Init` 之前**（JTAG 优先级高于 CRH/CRL）                                                                 | `Key.c`                                             |
 | **AFIO 时钟必须先开**                                                              | `GPIO_PinRemapConfig` 直接写 `AFIO->MAPR`，时钟没开**写被静默丢弃**。`RCC_APB2Periph_AFIO` 要和 GPIO 时钟一起开                                                                                          | `Key.c`                                             |
 | **绝不用 `GPIO_Remap_SWJ_Disable`（0x00300400）**                                  | 那是 "Full SWJ Disabled"，**连 SWD 一起关，ST-Link 再也连不上**。只能用 `GPIO_Remap_SWJ_JTAGDisable`（0x00300200，保留 SWD）                                                                             | `stm32f10x_gpio.h:195-197`                          |
 | **`GPIO_Init` 掩码绝不能写 `GPIO_Pin_All`**                                        | 会重写掩码里每一位的 CNF/MODE，毁掉 PB10/PB11（I2C2 → OLED+SHT30 全挂）、PA0/PA1（ADC）、甚至 **PA13/PA14（SWD → 连不上）**。**逐个引脚调用**                                                            | `Key.c` 的引脚表循环                                |
@@ -158,14 +158,24 @@ I2C2 上挂了多个从机，地址互不冲突：**OLED `0x3C`、SHT30 `0x44`**
 | SHT30     | I2C2          | PB10 / PB11                              | 地址 `0x44`，与 OLED 共用总线         |
 | MQ-2 烟雾 | ADC1_IN0      | PA0                                      | 5V 供电，经 10k/20k 分压（系数 ×1.5） |
 | 光敏电阻  | ADC1_IN1      | PA1                                      | 3.3V 供电                             |
-| 6 按键    | GPIO 上拉输入 | PB13 PB15 PA12 PB3 PB5 PB7               | 另一端接 GND，**按下=低**             |
+| 6 按键    | GPIO 上拉输入 | PB15 PA9 PB3 PB5 PB7 PB9（即按键1~6）    | 另一端接 GND，**按下=低**             |
 | LED       | GPIO 推挽     | PB12                                     | **高电平点亮**（PB12→1k→LED正极→GND） |
-| 蜂鸣器    | TIM1_CH4      | **PA11**                                 | 无源蜂鸣器，**待写**                  |
+| 蜂鸣器    | TIM1_CH3      | **PA10**                                 | 无源蜂鸣器（高电平触发），**待写**    |
 | SD 卡     | SPI1          | **PA4(CS) PA5(SCK) PA6(MISO) PA7(MOSI)** | **待写**                              |
 | SWD       | —             | PA13 / PA14                              | 调试用，**绝不能占用**                |
 
-**空闲引脚**：PA2 PA3 PA8 PA9 PA10 PA15 PB0 PB1 PB2 PB4 PB6 PB8 PB9 PB14
-其中 **PA9/PA10 建议留给 USART1 做串口日志**（`printf` 重定向）。
+**空闲引脚**：PA2 PA3 PA8 PA11 PA12 PA15 PB0 PB1 PB2 PB4 PB6 PB8 PB13 PB14
+其中 **PA2/PA3 建议留给 USART2 做串口日志**（`printf` 重定向）。
+
+> ⚠️ **按键占用了这些脚的复用功能**：
+> `PA9` = USART1_TX（**USART1 因此作废**）、`PB15` = TIM1_CH3N、
+> `PB7` = TIM4_CH2、`PB9` = TIM4_CH4、`PB5` = TIM3_CH2。
+>
+> 另外 **PB12~PB15 一整片都只有 TIM1 的互补输出/刹车脚**
+> （TIM1_CH1N / CH2N / CH3N / BKIN），**没有普通定时器通道**。
+> 往那片挂 PWM 器件要小心 —— 蜂鸣器最初选 PB14 就是因为这个原因换掉的
+> （PB14 只有 `TIM1_CH2N` 互补输出，得配 `TIM_OutputNState` + 死区配 0，
+> 而且 duty 是反相的）。
 
 ### 外设分配
 
@@ -174,13 +184,16 @@ I2C2 上挂了多个从机，地址互不冲突：**OLED `0x3C`、SHT30 `0x44`**
 | I2C2                 | OLED + SHT30（+ 未来 DS3231）    |
 | ADC1 + DMA1_Channel1 | MQ-2 + 光敏，连续扫描 + 循环搬运 |
 | TIM2                 | 按键 10ms 扫描中断               |
-| TIM1_CH4             | 蜂鸣器 PWM（待写）               |
+| TIM1_CH3             | 蜂鸣器 PWM（待写）               |
 | SPI1                 | SD 卡（待写）                    |
 | SysTick              | `Delay` 独占（轮询，不开中断）   |
 
-**空闲**：SPI2 USART1 USART2 USART3 I2C1 TIM3 TIM4 ADC2 RTC IWDG WWDG CAN USB
+**空闲**：SPI2 USART2 USART3 I2C1 TIM3 TIM4 ADC2 RTC IWDG WWDG CAN USB
+（**USART1 已作废** —— 它的 TX 脚 PA9 被按键占用；串口日志走 USART2）
 
-> 注意 `SPI2`（PB13/PB15）和 `USART3`（PB10/PB11）**被按键和 I2C2 堵死了**，别选。
+> 注意 `SPI2`（MOSI 脚 **PB15 是按键1**）和 `USART3`（PB10/PB11 是 I2C2）
+> **都被堵死了**，别选。（SPI2 另外两个脚 PB13/PB14 现在空闲，
+> 但缺 MOSI 就凑不齐一组，除非把按键1 挪走。）
 
 ---
 
@@ -235,10 +248,10 @@ src/main.c             启动顺序 + 应用逻辑
 
 | #   | 事项                                 | 状态                 | 关键约束                                                                                                                                                               |
 | --- | ------------------------------------ | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | **蜂鸣器 PWM 音调**                  | 等货                 | 无源蜂鸣器**高电平触发**模块；**PA11 / TIM1_CH4**；**必须 `TIM_CtrlPWMOutputs(TIM1, ENABLE)`**；`TIM_OC4Init` + `TIM_SetCompare4`；**非阻塞**（不能 `Delay` 卡主循环） |
+| 1   | **蜂鸣器 PWM 音调**                  | 等货                 | 无源蜂鸣器**高电平触发**模块；**PA10 / TIM1_CH3**；**必须 `TIM_CtrlPWMOutputs(TIM1, ENABLE)`**；`TIM_OC3Init` + `TIM_SetCompare3`；**非阻塞**（不能 `Delay` 卡主循环） |
 | 2   | **SD 卡 + FATFS 数据记录**           | 等货                 | SPI1（PA4/PA5/PA6/PA7）；格式 `时间戳,温度,湿度,烟雾,光照`                                                                                                             |
 | 3   | **IWDG 看门狗**                      | **可立刻做，不用买** | 教程 14-1。做完"工业级"才有实际支撑                                                                                                                                    |
-| 4   | 串口日志（USART1 + `printf` 重定向） | 未开始               | 建议占 PA9/PA10                                                                                                                                                        |
+| 4   | 串口日志（USART2 + `printf` 重定向） | 未开始               | 建议占 PA2/PA3                                                                                                                                                        |
 | 5   | 低功耗模式（停机/待机）              | 未开始               | 教程 13-x                                                                                                                                                              |
 | 6   | 多级菜单                             | 未开始               | 按键状态机已为此打好基础                                                                                                                                               |
 | 7   | **恢复传感器显示**                   | 待做                 | 调试期为按键界面腾位置撤下了。**恢复后 flash 会长约 2.8KB**                                                                                                            |

@@ -22,12 +22,12 @@ typedef struct
 /*顺序即按键编号1~6，与引脚分配表一致。全部上拉输入，按下=低电平*/
 static const KeyPinDef s_KeyPin[KEY_COUNT] =
 {
-	{GPIOB, GPIO_Pin_13},		//按键1
-	{GPIOB, GPIO_Pin_15},		//按键2
-	{GPIOA, GPIO_Pin_12},		//按键3
-	{GPIOB, GPIO_Pin_3},		//按键4 —— PB3/JTDO，靠下面的JTAG重映射释放
-	{GPIOB, GPIO_Pin_5},		//按键5
-	{GPIOB, GPIO_Pin_7},		//按键6
+	{GPIOB, GPIO_Pin_15},		//按键1
+	{GPIOA, GPIO_Pin_9},		//按键2
+	{GPIOB, GPIO_Pin_3},		//按键3 —— PB3/JTDO，靠下面的JTAG重映射释放
+	{GPIOB, GPIO_Pin_5},		//按键4
+	{GPIOB, GPIO_Pin_7},		//按键5
+	{GPIOB, GPIO_Pin_9},		//按键6
 };
 
 /*==================== 每个按键的状态 ====================*/

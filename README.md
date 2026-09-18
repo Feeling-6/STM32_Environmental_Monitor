@@ -31,10 +31,10 @@
 
 ### 🚧 计划中（尚未实现，勿在简历中声称已完成）
 
-- 蜂鸣器 PWM 音调报警（无源蜂鸣器，TIM1_CH4）
+- 蜂鸣器 PWM 音调报警（无源蜂鸣器，TIM1_CH3 / PA10）
 - SD 卡数据记录（SPI1 + FATFS，带时间戳）
 - IWDG 独立看门狗
-- 串口日志（USART1 + `printf` 重定向）
+- 串口日志（USART2 + `printf` 重定向）
 - 低功耗模式（停机 / 待机）
 - 多级菜单
 
@@ -59,7 +59,7 @@
 |---|---|---|
 | OLED / SHT30 | PB10 (SCL) / PB11 (SDA) | I2C2 |
 | MQ-2 / 光敏 | PA0 / PA1 | ADC1_IN0 / IN1 |
-| 6 按键 | PB13 / PB15 / PA12 / PB3 / PB5 / PB7 | GPIO |
+| 6 按键 | PB15 / PA9 / PB3 / PB5 / PB7 / PB9 | GPIO |
 | LED | PB12 | GPIO |
 | SWD 调试 | PA13 / PA14 | — |
 
