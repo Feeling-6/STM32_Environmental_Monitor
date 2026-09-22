@@ -5,16 +5,22 @@
 #include "Key.h"
 #include "LED.h"
 #include "Buzzer.h"
+#include "SD.h"
 #include "Delay.h"
 
 void SystemClock_Config_72MHz(void);
 
-/*调试界面用的累计计数：单击/双击/长按/长按重复*/
-static uint16_t s_Cnt[4] = {0, 0, 0, 0};
+/*按键6兼作SD卡的操作键：单击/双击=重新初始化，长按=跑写测试。
+  其余按键照常响蜂鸣器（音高不变）*/
+#define KEY_ID_SD			6
 
-/*主循环帧计数，每轮+1。用来盯着"蜂鸣器有没有阻塞主循环"：
-  它要是卡顿，说明哪次Beep里有阻塞延时。见Buzzer.h的"非阻塞"约定*/
-static uint16_t s_Frame = 0;
+/*是否需要在下一帧重画SD面板。★只在状态变化时置位——
+  绝不能每帧重读卡，读卡是阻塞的（一次块读几十毫秒）*/
+static uint8_t s_SdDirty = 1;
+
+/*心跳字符的下标。它替代了原来的帧计数，作用不变：
+  是"屏幕冻住"和"屏幕在转但内容旧"的唯一区分手段*/
+static uint8_t s_Spin = 0;
 
 /*按键号→音高，下标0=按键1。上行音阶，按1到6音调依次升高，
   一耳朵就能听出按的是哪个键*/
@@ -28,12 +34,86 @@ static const uint16_t s_NoteFreq[KEY_COUNT] = {
   单次太长会连成一片听不出节奏*/
 static const uint16_t s_EventMs[5] = {0, 100, 200, 200, 60};
 
+/*SD卡诊断面板。四行分别是：卡型+容量 / 块0头4字节 / 引导扇区签名 / 写测试结果。
+  只在需要时调用（s_SdDirty），不要每帧调*/
+static void DrawSdPanel(void)
+{
+	uint8_t i;
+
+	/*整屏重画而不是逐字段改：OLED_Clear只是清1KB显存，比"小心地擦掉上次
+	  多写出来的字符"可靠得多*/
+	OLED_Clear();
+
+	/*---- 行1：卡型 + 容量 ----*/
+	OLED_ShowString(1, 1, "SD:");
+	switch (SD_Info.Type)
+	{
+		case SD_TYPE_SDHC: OLED_ShowString(1, 4, "SDHC"); break;
+		case SD_TYPE_SDSC: OLED_ShowString(1, 4, "SDSC"); break;
+		case SD_TYPE_SDXC: OLED_ShowString(1, 4, "SDXC"); break;
+		default:           OLED_ShowString(1, 4, "----"); break;
+	}
+	if (SD_Info.CapacityMB >= 65536u)
+	{
+		/*★≥64GB 改用GB显示。OLED_ShowNum是按位取数的、没有溢出提示，
+		  5位十进制表不到10万以上：128GB(131072MB)会显示成 31072MB——
+		  和一张真31GB卡长得一模一样。换GB之后5位能表到99999GB*/
+		OLED_ShowNum(1, 8, SD_Info.CapacityMB / 1024u, 5);
+		OLED_ShowString(1, 13, "GB");
+	}
+	else if (SD_Info.CapacityMB)
+	{
+		/*5位而不是4位：4位会把16GB卡(15360MB)显示成 5360MB*/
+		OLED_ShowNum(1, 8, SD_Info.CapacityMB, 5);
+		OLED_ShowString(1, 13, "MB");
+	}
+	else
+	{
+		OLED_ShowString(1, 8, " UNKNOWN");
+	}
+
+	/*---- 行2：块0的头4字节 ----
+	  没读成时这里全是FF，和"读到了FF"不是一回事——配合行4的错误码区分*/
+	OLED_ShowString(2, 1, "B0:");
+	for (i = 0; i < 4; i ++)
+	{
+		OLED_ShowHexNum(2, (uint8_t)(4 + i * 3), SD_Info.Blk0Head[i], 2);
+	}
+
+	/*---- 行3：引导扇区签名 ----
+	  ★这是整个验收里最强的一条判据：FAT格式化的卡上，偏移510/511必然是
+	  55 AA。只有完整、无错位、无丢字节的512字节读取才会让它落在第510字节。
+	  读时序差一点、丢一个字节、RXNE没清，签名立刻错位。
+	  这里显示【实际读到的两个字节】：FF FF（根本没读成）和 00 00
+	  （读到了但不是引导扇区）都是NG，但病根完全不同*/
+	OLED_ShowString(3, 1, "SIG:");
+	OLED_ShowHexNum(3, 5, SD_Info.Blk0Tail[0], 2);
+	OLED_ShowHexNum(3, 7, SD_Info.Blk0Tail[1], 2);
+	if (SD_Info.Blk0Tail[0] == 0x55 && SD_Info.Blk0Tail[1] == 0xAA)
+	{
+		OLED_ShowString(3, 9, " OK");
+	}
+	else
+	{
+		OLED_ShowString(3, 9, " NG");
+	}
+
+	/*---- 行4：写测试结果 + 最近一次错误码 ----
+	  错误码原样显示，对照SD.h里的码表就能在没有调试器的情况下定位故障*/
+	OLED_ShowString(4, 1, "RW:");
+	switch (SD_Info.TestResult)
+	{
+		case SD_TEST_RUN:  OLED_ShowString(4, 4, "RUN "); break;
+		case SD_TEST_OK:   OLED_ShowString(4, 4, "OK  "); break;
+		case SD_TEST_FAIL: OLED_ShowString(4, 4, "FAIL"); break;
+		default:           OLED_ShowString(4, 4, "----"); break;
+	}
+	OLED_ShowNum(4, 9, SD_Info.LastError, 2);
+}
+
 int main(void)
 {
 	KeyEvent ev;
-	uint8_t i;
-	uint8_t latch = 0;						//本帧内按下过的按键位图
-	static uint8_t lastLit[KEY_COUNT] = {0};
 
 	SystemClock_Config_72MHz();				//必须最先
 
@@ -49,16 +129,14 @@ int main(void)
 
 	LED_Init();
 	Buzzer_Init();
+	SD_Init();								//放在OLED之后：SD出故障时屏幕已经可用，故障看得见
 	Key_Init();								//放最后：SWJ重映射会清AFIO->MAPR，别抹掉别人的
 
-	/*静态标签只画一次*/
-	OLED_ShowString(1, 1, "C   D   L   R");	//计数标题
-	OLED_ShowString(2, 1, "123456");		//按键编号
-	OLED_ShowString(3, 1, "......");		//实时按下状态
-	OLED_ShowString(4, 1, "K- ------");		//最近事件
+	DrawSdPanel();
+	s_SdDirty = 0;
 
-	/*上电自检：听到"嘀"一声，就说明PB1接线 + TIM3时钟 + PWM通路全是通的，
-	  不用先按按键。非阻塞，不会拖慢首屏绘制*/
+	/*上电自检：听到"嘀"一声，就说明PB1接线 + TIM3时钟 + PWM通路全是通的。
+	  非阻塞，不会拖慢首屏绘制*/
 	Buzzer_Beep(BUZZER_NOTE_C6, 100);
 
 	while (1)
@@ -67,51 +145,59 @@ int main(void)
 		while (Key_GetEvent(&ev))
 		{
 			LED_Toggle();					//每个事件翻转一次LED：没OLED也能验证驱动
-			s_Cnt[ev.Event - 1] ++;
 
-			/*响一声：按键号决定音高，事件类型决定时长。非阻塞，立刻返回*/
-			Buzzer_Beep(s_NoteFreq[ev.Key - 1], s_EventMs[ev.Event]);
-
-			OLED_ShowChar(4, 2, (char)(ev.Key + '0'));
-			OLED_ShowString(4, 4, Key_EventName(ev.Event));
-			OLED_ShowNum(4, 10, s_NoteFreq[ev.Key - 1], 4);	//本次音高，和听到的声音对照
-			OLED_ShowString(4, 14, "Hz");
-
-			OLED_ShowNum(1, 2,  s_Cnt[0], 2);
-			OLED_ShowNum(1, 6,  s_Cnt[1], 2);
-			OLED_ShowNum(1, 10, s_Cnt[2], 2);
-			OLED_ShowNum(1, 14, s_Cnt[3], 2);
-		}
-
-		/*实时按下状态。用"本帧内按下过"的锁存而不是直接采样：
-		  一帧约80ms(50ms延时+30ms整屏刷新)，直接采样的话短于80ms的轻碰
-		  会完全看不见，会误以为那个键坏了。锁存保证任何一次按下至少点亮一帧。*/
-		for (i = 0; i < KEY_COUNT; i ++)
-		{
-			if (Key_IsDown(i + 1))
+			/*★按键6的长按重复【故意】不发声：写测试期间它每200ms往队列里排一个，
+			  测试结束时会把结果音当场掐掉——Buzzer_Beep是替换不是叠加，
+			  成功音(A5/300ms)和失败音(C5/800ms)本来靠时长区分，
+			  被一个60ms的C6盖掉之后两种结果就再也分不出来了*/
+			if (!(ev.Key == KEY_ID_SD && ev.Event == KEY_EVENT_LONG_REPEAT))
 			{
-				latch |= (uint8_t)(1 << i);
+				Buzzer_Beep(s_NoteFreq[ev.Key - 1], s_EventMs[ev.Event]);
 			}
-		}
 
-		for (i = 0; i < KEY_COUNT; i ++)
-		{
-			uint8_t lit = (uint8_t)((latch >> i) & 1);
+			if (ev.Key != KEY_ID_SD) continue;
 
-			if (lit != lastLit[i])			//只在变化时重画
+			if (ev.Event == KEY_EVENT_LONG)
 			{
-				lastLit[i] = lit;
-				OLED_ShowChar(3, i + 1, lit ? '#' : '.');
+				/*写测试要阻塞几百毫秒，先把"正在跑"刷上屏——
+				  不刷的话屏幕看起来像卡死了*/
+				OLED_ShowString(4, 1, "RW:RUN ");
+				OLED_Update();
+
+				SD_WriteTest();
+				s_SdDirty = 1;
+
+				/*结果音刻意避开按键6自己的C6，免得和按键音糊成一声*/
+				Buzzer_Beep((SD_Info.TestResult == SD_TEST_OK) ? BUZZER_NOTE_A5
+				                                               : BUZZER_NOTE_C5,
+				            (SD_Info.TestResult == SD_TEST_OK) ? 300 : 800);
 			}
+			else if (ev.Event == KEY_EVENT_CLICK || ev.Event == KEY_EVENT_DOUBLE)
+			{
+				/*重新识别。双击也认：单击要等400ms双击窗口过期才上报，
+				  只认单击的话"快速按两下"看起来完全没反应*/
+				SD_Init();
+				s_SdDirty = 1;
+
+				Buzzer_Beep(SD_Info.Ready ? BUZZER_NOTE_A5 : BUZZER_NOTE_C5, 200);
+			}
+			/*★KEY_EVENT_LONG_REPEAT 【故意】不处理，不是漏了：
+			  长按按键6时每200ms还会再报一次、最多50次，不挡掉的话写测试会
+			  连跑几十遍——界面卡十几秒，卡也被白写几十次。*/
 		}
 
-		latch = 0;							//本帧用完就清
+		if (s_SdDirty)
+		{
+			DrawSdPanel();
+			s_SdDirty = 0;
+		}
 
-		/*非阻塞观测窗。左边是帧计数：蜂鸣器只要在哪次Beep里阻塞了主循环，
-		  这个数就会肉眼可见地卡顿。右边是BEEP标志，闪一下就说明确实在响。
-		  这两样是"非阻塞"唯一的现场证据*/
-		OLED_ShowNum(3, 8, s_Frame ++, 5);
-		OLED_ShowString(3, 13, Buzzer_IsBusy() ? "BEEP" : "    ");
+		/*心跳。它转了就说明主循环还活着。
+		  ★但停下来【不一定】是故障：按按键6 会故意阻塞（重新识别约100ms~1.1s，
+		  写测试几百ms），那期间它本来就不动。区分"阻塞"和"卡死"要看它是否恢复：
+		  恢复了 = 只是阻塞；一直不动 = 某个等待循环的超时没生效*/
+		OLED_ShowChar(4, 16, "|/-\\"[s_Spin & 3]);
+		s_Spin ++;
 
 		OLED_Update();
 		Delay_ms(50);

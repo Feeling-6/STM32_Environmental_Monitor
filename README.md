@@ -29,13 +29,26 @@
   - **非阻塞**：倒计时跑在 TIM3 更新中断里，响的时候主循环照常刷新
   - 上电自检响一声
 
+**存储**
+- **SD 卡块级驱动**（SPI1，PA4~PA7，硬件 SPI 默认映射，无重映射）
+  - 完整 SD 协议：CMD0/CMD8/CMD55+ACMD41/CMD58/CMD9/CMD17/CMD24，支持 SDSC/SDHC/SDXC
+  - 从 CSD 解析容量，识别卡型（靠 CMD58 的 CCS 位决定块地址还是字节地址）
+  - **所有等待循环都带边界**，没插卡时约 100ms 返回而不是挂死
+  - 内置**写-读回-还原**自检（按键触发，只碰卡的最后一个块）
+  - 另有一个**SPI 回环自检** `SD_LoopbackTest()`（短接 PA6-PA7 即可在不插卡的情况下
+    验证整层 SPI 收发）。它没有调用点，会被 `--gc-sections` 回收，
+    **要用得临时在 `main()` 里加一行调用**——第一次上板时就是靠它把 SPI 层钉死的
+
 **底层**
 - I2C2 总线层：**幂等初始化 + 超时保护 + 总线死锁恢复**，被 OLED 和 SHT30 共用
 - SysTick 轮询延时模块
 
 ### 🚧 计划中（尚未实现，勿在简历中声称已完成）
 
-- SD 卡数据记录（SPI1 + FATFS，带时间戳）—— 模块 VCC 必须接 5V
+- **SD 卡 FATFS 数据记录**（时间戳格式 `时间戳,温度,湿度,烟雾,光照`）
+  - 块级驱动和协议层已完成并验证，**只剩 FatFs 挂载这一层**
+  - ⚠️ 现成的 FatFs R0.08a 那份 `diskio.c` 挂的是 **SDIO**，而 F103C8T6 没有
+    SDIO 外设，移植时整层要重写成 SPI 版（建在已有的块级驱动之上）
 - IWDG 独立看门狗
 - 串口日志（USART2 + `printf` 重定向）
 - 低功耗模式（停机 / 待机）
@@ -186,7 +199,8 @@ lib\Hardware\OLED_Font.h:6:1: warning: missing braces around initializer
 - [x] 6 按键状态机（单击 / 双击 / 长按 / 长按重复）
 - [x] LED 指示
 - [x] 蜂鸣器 PWM 音调报警（PB1 / TIM3_CH4，非阻塞）
-- [ ] SD 卡数据记录（FATFS + 时间戳）
+- [x] SD 卡块级驱动（SPI1 硬件 SPI + 完整 SD 协议 + 两个自检）
+- [ ] SD 卡 FatFs 数据记录（块级驱动之上，只剩这一层）
 - [ ] 独立看门狗 IWDG
 - [ ] 串口日志（`printf` 重定向）
 - [ ] 低功耗模式
@@ -206,6 +220,7 @@ lib\Hardware\OLED_Font.h:6:1: warning: missing braces around initializer
 │   │   ├── Key.c/h          TIM2 中断扫描 + 状态机 + 环形队列
 │   │   ├── LED.c/h
 │   │   ├── Buzzer.c/h       TIM3_CH4 PWM 音调（非阻塞，中断倒计时）
+│   │   ├── SD.c/h           SPI1 块级驱动（CMD0/8/55/41/58/9/17/24 + CSD 解析）
 │   │   └── Delay.c/h        SysTick 轮询延时
 │   └── SPL/                 vendored ST 标准外设库 v3.6.0
 ├── src/
